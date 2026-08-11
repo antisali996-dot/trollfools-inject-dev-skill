@@ -13,7 +13,16 @@
 - 可编译参考模板（hook.c / build.sh / check_macho.py）
 - 真实案例复盘（examples/qs-noads-case.md）
 
-## 安装方式
+## 快速开始
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/antisali996-dot/trollfools-inject-dev-skill.git
+cd trollfools-inject-dev-skill
+```
+
+### 2. 安装 Skill
 
 ```bash
 # opencode
@@ -24,6 +33,44 @@ cp -r . ~/.config/opencode/skills/trollfools-inject-dev/
 mkdir -p ~/.codex/skills/trollfools-inject-dev
 cp -r . ~/.codex/skills/trollfools-inject-dev/
 ```
+
+> 安装目录名（`trollfools-inject-dev`）必须与 SKILL.md frontmatter 的 `name` 一致，否则 Agent 无法加载。
+
+### 3. 安装相关依赖
+
+**构建工具链（必需，用于交叉编译 iOS dylib）：**
+
+```bash
+# LLVM（含 clang + lld / ld64.lld）— 本项目验证有效的构建工具链
+winget install LLVM.LLVM          # Windows
+brew install llvm                 # macOS
+
+# Python 3（运行 check_macho.py 结构验证脚本）
+winget install Python.Python.3.12 # Windows
+brew install python@3.12          # macOS
+```
+
+**Theos iOS SDK（无 Xcode 环境编译 iOS 代码，提供头文件 + tbd）：**
+
+```bash
+git clone --recursive https://github.com/theos/theos.git /path/to/theos
+# 设置环境变量：export THEOS_SDK=/path/to/theos
+```
+
+**逆向分析工具：**
+
+| 工具 | 用途 | 备注 |
+|---|---|---|
+| IDA Pro + ida-pro-mcp | 静态反编译、xrefs、调用链分析 | 商业软件，可选（有替代品可替换） |
+| Python + struct | Mach-O 解析 | 随 check_macho.py 使用 |
+
+**设备端（iPhone）：**
+
+- TrollStore（安装 TrollFools）
+- TrollFools（dylib 注入，weak 加载）
+- iOS 14-17，RootHide 环境下 Frida 不可靠（改用可见标记验证）
+
+> 依赖核对清单见 SKILL.md「Before Start Checklist」——逐项确认后再开始任务。
 
 ## 使用示例
 
