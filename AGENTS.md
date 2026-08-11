@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-`trollfools-inject-dev-skill` 是一个 **Skill 定义仓库**：核心产物是 `SKILL.md`（一套 iOS TrollFools 注入插件开发的完整方法论），README.md 是给人类看的介绍。本仓库是 GitHub 同步发布版本，**本地主版本**位于 `~\.config\opencode\skills\trollfools-inject-dev\`。
+`trollfools-inject-dev-skill` 是一个 **Skill 定义仓库**：核心产物是 `SKILL.md`（一套 iOS TrollFools 注入插件开发的完整方法论），README.md 是给人类看的介绍。本仓库是 GitHub 同步发布版本，**本地主版本**位于 `~/.config/opencode/skills/trollfools-inject-dev/`。
 
 ## 仓库结构
 
@@ -38,7 +38,7 @@ trollfools-inject-dev/
 
 ### 同步规则
 
-- **本地为主版本**：先改 `~\.config\opencode\skills\trollfools-inject-dev\`，再同步到本仓库。
+- **本地为主版本**：先改 `~/.config/opencode/skills/trollfools-inject-dev/`，再同步到本仓库。
 - 同步命令：删除本仓库全部内容，将本地主版本完整复制过来，更新 AGENTS.md 后再提交。
 
 ### 提交规范

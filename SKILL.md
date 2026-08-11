@@ -233,7 +233,7 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 | **major**（**x**.0.0） | 工作流程或结构变更、决策树调整、章节增删 | `1.0.0 → 2.0.0` |
 
 维护规则：
-- 每次更新同步更新本地源（`~\.config\opencode\skills\trollfools-inject-dev\`）与 GitHub 仓库（`trollfools-inject-dev-skill`），本地为主版本
+- 每次更新同步更新本地源（`~/.config/opencode/skills/trollfools-inject-dev/`）与 GitHub 仓库（`trollfools-inject-dev-skill`），本地为主版本
 - 内容变更必须保留历史经验——只增不删，或迁移时保持知识零丢失
 - 发布到 GitHub 时更新 CHANGELOG 或 Release notes
 
