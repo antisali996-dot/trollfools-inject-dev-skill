@@ -1,7 +1,7 @@
 ---
 name: trollfools-inject-dev
 description: iOS App 去广告/功能修改的 TrollFools 注入插件开发全流程。用于分析目标 App 机制、设计注入方案、编写 Hook dylib、交叉编译、注入调试与发布。适用于 TrollStore/TrollFools 环境下的 iOS 插件开发任务。
-version: 1.0.0
+version: 2.0.0
 tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆向, 注入, 去广告]
 ---
 
@@ -28,21 +28,56 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 
 ---
 
-## Skill 调用条件
+## Before Start Checklist
 
-### 应该启用本 Skill 的场景
-- 用户要求为特定 iOS App 制作**注入式**插件（去广告/去限制/功能增强）
-- 目标明确为 **TrollFools / TrollStore 注入方式**（而非重打包 IPA 重装）
-- 需要分析 App 内部广告/校验机制的调用链
-- 需要在无 macOS/Xcode 环境下交叉编译 iOS dylib
-- 用户提供或可获得解密 IPA
+> Agent 开始任何任务前，逐项确认。缺项即阻塞——先解决缺项再动手，禁止跳过。
 
-### 不需要（或不适用）本 Skill 的场景
-- 目标 App **未解密**（加密 IPA 无法静态分析，注入兼容性差）——先要求解密版
-- 用户只需要**重打包安装**（直接改主程序二进制 + TrollStore 安装）——流程不同，但本 Skill 的逆向分析部分仍可复用
-- 目标是 Android/Windows/Linux 程序——本 Skill 面向 iOS
-- 无测试设备（iPhone）——无法验证，先解决设备问题
-- 纯动态分析需求（Frida 调试）——本 Skill 的动态方案受限（见工具链经验），需单独评估 Frida 可用性
+| # | 检查项 | 确认方式 | 缺项处理 |
+|---|---|---|---|
+| 1 | IPA 状态 | 是否**解密版**（可用 Mach-O 加载器解析） | 未解密 → 先获取解密版，中止后续 |
+| 2 | App 版本 | 记录目标 App 的 bundle id 与版本号 | 影响方法名判断，升级后需重新分析 |
+| 3 | Bundle ID | `Payload/*.app/Info.plist` 读取 | 用于注入确认与版本差异判断 |
+| 4 | 架构 | arm64 / arm64e（`lipo -info` 或 Python 解析） | arm64 单 slice 在 arm64e 设备兼容 |
+| 5 | iOS 环境 | iOS 版本（14-17）、是否 RootHide、TrollStore 状态 | 决定 Frida 是否可用（RootHide 下不可靠） |
+| 6 | TrollStore/TrollFools | 已安装且注入可用 | 缺失 → 先安装，否则无法验证 |
+| 7 | 测试方案 | 已确定**可见验证**手段（弹窗/标题修改） | 未定 → 先设计弹窗验证，禁止「试试看」 |
+
+---
+
+## Decision Tree
+
+> Agent 根据输入自动选择路线，减少试错。
+
+```
+开始
+│
+├─ IPA 是否解密？
+│   ├─ 否 → 要求解密版 IPA，中止（加密 IPA 无法静态分析）
+│   └─ 是 ↓
+│
+├─ 是否适合 TrollFools 注入？
+│   ├─ 用户需要重打包安装（直接改主程序二进制）？
+│   │   └─ 是 → 走重打包分支（逆向分析部分仍复用本 Skill）
+│   ├─ 目标是 Android/Windows/Linux？→ 不适用本 Skill，中止
+│   ├─ 无测试设备？→ 先解决设备，中止
+│   └─ 是（TrollStore/TrollFools 注入）↓
+│
+├─ 目标功能类型？
+│   ├─ 开屏/插屏广告 → 找 SDK 聚合出口（TopOn `showSplashWithPlacementID:`）+ 服务端总开关
+│   ├─ 越狱检测 → 反检测 Hook（判定函数返回未越狱）
+│   ├─ 内购校验 → 分析服务端校验链路，找判定函数
+│   └─ 其他功能修改 → 逆向定位触发点，按 hook-design.md 设计
+│       ↓
+├─ 执行标准流程（见下方 SOP 8 步）
+│       ↓
+├─ 崩溃/失效？
+│   ├─ SIGILL (EXC_BAD_INSTRUCTION) → 查 constructor 指针 / rebase（macho-debug.md 陷阱 2）
+│   ├─ SIGTRAP (EXC_BREAKPOINT) → Frida 注入被拒（troubleshooting.md 问题 9）
+│   ├─ 卡住（无崩溃）→ hook 破坏启动流程（troubleshooting.md 问题 8）
+│   ├─ 无任何效果（无弹窗无崩溃）→ 弱加载失败（troubleshooting.md 问题 1-2）
+│   └─ Hook 不生效 → 版本差异 MISS / Hook 点错误（hook-design.md）
+└─ 完成 → 输出 Final Report（见下方格式）
+```
 
 ---
 
@@ -80,227 +115,127 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 
 ## 标准工作流程（SOP）
 
+> 每步「要点」为必做，「详见」指向详细参考。完整分析流程见 references/。
+
 ### 1. 环境检查
-- **做什么**：确认目标 IPA、工具链、测试设备可用
+- **要点**：确认目标 IPA（解密版）、工具链（clang + ld64.lld）、测试设备（TrollStore + TrollFools）
 - **为什么**：注入插件的坑大部分在构建环境，先确认再动手
 - **常用工具**：`Get-ChildItem`（文件确认）、`clang --version`、`gh auth status`
-- **注意事项**：
-  - 确认 IPA 是**解密版**（可用 Mach-O 加载器解析）
-  - 确认 frida-server/TrollStore 环境状态（frida 在 RootHide 环境可能不可用）
-  - 记录目标 App 的 bundle id 与版本号（后续判断版本差异）
+- **详见**：references/macho-debug.md（工具链结论）
 
 ### 2. 项目结构分析
-- **做什么**：解包 IPA，列出主程序、Frameworks、Bundle 资源
-- **为什么**：识别广告 SDK 家族（Frameworks 目录直接暴露技术栈）、定位主二进制
+- **要点**：解包 IPA，列出主程序、Frameworks、Bundle 资源，识别广告 SDK 家族
+- **为什么**：Frameworks 目录直接暴露技术栈；主程序是 `Payload/*.app/*`（无扩展名大文件）
 - **常用工具**：`tar -xf`、Python struct 解析 Mach-O
-- **注意事项**：主程序是 `Payload/*.app/*`（无扩展名大文件）；Frameworks 里每个 framework 都是一个广告/功能 SDK
 
 ### 3. 目标程序分析（核心）
-- **做什么**：IDA 反编译，梳理目标功能的完整触发链路
-- **为什么**：只有搞清楚"从启动到展示"的全部调用链，才能确定 Hook 点覆盖范围
-- **常用工具**：IDA Pro + ida-pro-mcp（decompile/xrefs/stub 调用者扫描/classref 扫描）
-- **注意事项**：
-  - 找**唯一出口**（如 TopOn 聚合的 `showSplashWithPlacementID:` 是所有渠道开屏的最终出口）
-  - 用 **selref→__objc_stubs→调用者** 三层跳转找 OC 方法真实调用方（不能只看 selref 直接引用）
-  - 用 **classref 扫描**列出"谁 alloc 了目标类"（本项目获得 235 个调用者全景）
-  - 记录**服务端下发开关**（如 `isAdsWithAdCode:` 读取 advertiseList）——服务端可控的开关是最佳总闸
+- **要点**：IDA 反编译，梳理目标功能从"启动到展示"的完整触发链路
+- **核心方法**：找唯一出口、selref→`__objc_stubs`→调用者三层跳转、classref 扫描、服务端下发开关识别
+- **详见**：references/ida-workflow.md
 
 ### 4. 确定注入方案
-- **做什么**：选定 Hook 点层级（入口层/展示层/SDK 层/总开关），设计多级防护
-- **为什么**：单点 Hook 可能漏（多个入口），总开关 + 出口双保险
-- **注意事项**：
-  - 高层入口（`showSplashAds`）+ SDK 出口（`ATAdManager.showSplashWithPlacementID`）+ 总开关（`isAdsWithAdCode:` 返回 NO）三层
-  - **Hook 点必须逐一用 IDA 确认方法存在**（避免版本差异 MISS）
-  - 区分"用户主动触发"（保留，如激励视频）与"自动弹出"（拦截）
+- **要点**：选定 Hook 点层级（总开关/展示入口/SDK 出口），设计多级防护；Hook 点逐一用 IDA 确认存在
+- **详见**：references/hook-design.md
 
 ### 5. 编写插件
-- **做什么**：纯 C 源码 + objc runtime API + dlsym 符号解析
-- **为什么**：减少链接依赖（undefined 符号在 weak 加载下风险高）
-- **模板**：见下方"可复用模板 - Hook 模板"（⚠️ 模板代码需按目标 App 类名/方法名调整，不可直接复制）
-- **注意事项**：
-  - **Hook 时机**：constructor 只注册 `UIApplicationDidFinishLaunchingNotification` 观察者，全部 Hook 在启动完成后执行（constructor 早期直接调 objc runtime API 会 SIGILL）
-  - **禁用栈保护**：编译加 `-fno-stack-protector`（Theos SDK tbd 缺 `___stack_chk_fail`）
-  - **链接参数**：`-undefined dynamic_lookup`（stdio 等符号运行时解析）
-  - **不要 hook 启动流程关键步骤**（如启动背景图 `setDelayStartBackgroundImageView`，置空导致启动卡住）
+- **要点**：纯 C + objc runtime API + dlsym；constructor 只注册通知，Hook 放启动后；禁用栈保护
+- **模板**：templates/hook.c（⚠️ 需按目标 App 调整，不可直接复制）
+- **详见**：references/hook-design.md（Hook 时机规则）
 
 ### 6. 调试验证
-- **做什么**：注入后验证插件是否**真的加载并执行**
-- **为什么**：TrollFools 用 `LC_LOAD_WEAK_DYLIB` 弱加载——**加载失败静默跳过**（无崩溃无日志），必须先建立可见验证
-- **常用工具**：可见标记（启动弹窗/首页标题修改）、TrollFools 注入日志、.ips 崩溃日志
-- **注意事项**：
-  - **弹窗验证**是最可靠手段（`UIAlertView` + 2 秒 NSTimer 自动消失）
-  - 弱加载失败的表现：无弹窗、无崩溃、无任何迹象
-  - 崩溃报告在：设置 → 隐私与安全性 → 分析与改进 → 分析数据（.ips 格式：首行 JSON 元数据 + body）
+- **要点**：建立**可见验证**（弹窗/标题）——weak 加载失败静默无痕，没有弹窗标记就等于没验证
+- **常用工具**：可见标记（`UIAlertView` + 2 秒 NSTimer）、TrollFools 注入日志、.ips 崩溃日志
+- **详见**：references/troubleshooting.md
 
 ### 7. 修复问题
-- **做什么**：按崩溃/失效表现定位修复（见"常见问题与解决方案"）
-- **为什么**：本项目 25 个版本迭代全部踩在 4 类问题上
-- **方法**：**最小化二分**——只保留最小 Hook 集验证，逐批加回定位有问题的 Hook
-- **注意事项**：一次只改一个变量；每个版本给用户**可验证的预期**（弹窗变没变）
+- **要点**：按崩溃/失效表现定位修复；**最小化二分**——一次只改一个变量，每个版本给用户可验证预期
+- **详见**：references/troubleshooting.md（10 个常见问题 + 排查方法）
 
 ### 8. 最终交付
-- **做什么**：清理测试产物、写 README/LICENSE、GitHub 开源 + Release
-- **为什么**：可复现 + 可维护
-- **常用工具**：git、gh（`gh repo create --public --source . --push`、`gh release create v1.0.0 QSNoAds.dylib`）
-- **注意事项**：README 必须包含**踩坑记录**（zig 结构问题等），这是别人（和未来的你）最需要的
+- **要点**：清理测试产物、写 README/LICENSE、GitHub 开源 + Release；README 必须含踩坑记录
+- **常用工具**：git、gh（`gh repo create --public --source . --push`、`gh release create v1.0.0 out.dylib`）
 
 ---
 
-## 工具链经验
+## Anti Patterns
 
-| 工具 | 用途 | 适合解决的问题 |
-|---|---|---|
-| **IDA Pro + ida-pro-mcp** | 静态反编译、xrefs、stub/classref 扫描 | 找调用链、Hook 点、唯一出口 |
-| **Python + struct** | Mach-O 解析（load commands/段/section/指针） | 验证二进制结构、发现链接器缺陷 |
-| **LLVM clang + ld64.lld** | iOS 交叉编译 + 链接 | 本项目验证有效的构建方式（生成 chained fixups）——其他工具链需先验证结构 |
-| **Theos iOS SDK** | 头文件 + tbd 库 | 无 Xcode 环境下的 iOS 编译 |
-| **TrollFools** | dylib 注入（weak 加载到任意 framework） | 设备端注入与移除 |
-| **.ips 崩溃日志** | 崩溃分析 | 崩溃线程/模块归属/异常类型 |
-| **Frida + frida-server** | 动态 hook/内存操作 | ⚠️ 本项目不可用（gum 注入被拒/SIGTRAP，RootHide 环境兼容差）——动态验证受阻时改用**可见标记** |
-| **git + gh** | 版本管理与发布 | 开源交付 |
+> Agent 禁止以下行为。这些都是本项目真实踩过的坑。
 
----
-
-## 逆向与开发经验
-
-### 如何寻找关键代码位置
-1. 从入口追链路：`AppDelegate didFinishLaunching → startProcedure → initAds → showSplashAds`
-2. 用字符串反推：搜索功能关键词（`splash`、`shake`、`ads`）→ 找引用者
-3. 用 **stub 扫描**找 OC 方法真实调用方（selref → `__objc_stubs` → cref 调用者）
-4. 找**唯一出口**：所有渠道最终都经过的 SDK 方法（如 TopOn `showSplashWithPlacementID:`）
-
-### 如何判断 Hook 点
-- 优先：**总开关**（服务端可控的判定函数，如 `isAdsWithAdCode:`）
-- 其次：**展示入口**（`showSplashAds` 等）
-- 兜底：**SDK 最终出口**（聚合层 `ATAdManager.showSplashWithPlacementID:`）
-- 确认方法存在：`class_getClassMethod/class_getInstanceMethod` 返回非空（运行时打印确认，避免 MISS）
-
-### 如何验证修改是否生效
-- **弹窗/UI 可见标记**（最强）：启动后弹 `UIAlertView`（2 秒自动消失）
-- 首页标题修改（`setTitle:`）
-- **禁止**依赖沙盒日志文件（iOS 沙盒 Documents 用户无法访问）
-- 崩溃报告：仅崩溃时可用，正常运行无法确认
-
-### 如何分析崩溃原因
-- **EXC_BAD_INSTRUCTION (SIGILL)**：执行了非法指令——常见于 constructor 指针错误（rebase 缺失）或 runtime 未就绪时调用 objc API
-- **EXC_BREAKPOINT (SIGTRAP)**：断点/断言——常见于 Frida gum 注入被拒或 assert
-- **卡住（无崩溃）**：某 Hook 破坏了启动流程（如启动背景图流程被置空）
-- 崩溃线程模块归属：看 `usedImages[i].name`，镜像名 `?` 且地址在 dyld 范围外 = 注入代码
-
-### 如何处理版本差异
-- Hook 前用 `class_getInstanceMethod` 检查，MISS 打印日志（不崩溃）
-- 方法名以 IDA 当前版本为准；升级目标 App 后重新分析
-- 多架构：arm64 单 slice 在 arm64e 设备兼容；如需更稳可做 arm64+arm64e fat
-
----
-
-## 常见问题与解决方案
-
-**问题 1：插件注入后完全无效果（无弹窗、无崩溃、无日志）**
-- 原因：TrollFools 用 `LC_LOAD_WEAK_DYLIB` 弱加载——dyld 加载失败**静默跳过**，不报错
-- 排查：① 确认注入日志完整（ct_bypass 签名成功）② 用弹窗验证是否加载 ③ 检查 dylib 结构
-- 解决方案：修复 dylib 结构（见问题 2），或改强加载（改主程序 LC_LOAD_DYLIB 重打包）
-
-**问题 2：zig 编译的 dylib 不被 dyld 接受（weak 加载静默失败）**
-- 原因：zig 链接器产物缺 `CHAINED_FIXUPS` + `__init_offsets`（dyld 对 iOS 15+ 新链接库的期望结构），且 rebase 表为空
-- 排查：解析 load commands——正常 dylib 应有 `LC_DYLD_CHAINED_FIXUPS(0x80000034)`；zig 产物是空 `LC_DYLD_INFO(0x26)`
-- 解决方案：本项目验证有效的是 **LLVM clang + ld64.lld**；若使用其他工具链，先验证上述结构再继续；手动 Python 修补 rebase 属高危操作（易损坏 load commands）
-
-**问题 3：注入后闪退（SIGILL @ constructor）**
-- 原因：`__mod_init_func` 的 constructor 指针缺 image base（zig 空 rebase 表导致），dyld 跳到 0x7e8 之类错误地址
-- 排查：崩溃日志 `qs_noads_init + 偏移`、检查 `__mod_init_func` 指针值是否含 `0x100000000` 基址
-- 解决方案：换 lld 构建（生成正确 chained fixups）；或 Python 修指针+rebase（高风险，需逐字节验证）
-
-**问题 4：手动修 rebase 后 load commands 全变 0x0**
-- 原因：zig 的 `LC_DYLD_INFO` 只有 **16 字节**（仅 cmd/size/rebase_off/rebase_size，无 bind 字段）——修复脚本把 bind 字段写到下一条命令（SOURCE_VER）的位置
-- 排查：dump load commands，第 N 条后全为 `cmd=0`
-- 解决方案：只更新 rebase_off/rebase_size 两个字段（off+8/off+12），**绝不碰 off+16**（zig 16 字节 DYLD_INFO 没有该字段）
-
-**问题 5：rebase 数据放文件末尾，重签后被丢弃**
-- 原因：`__LINKEDIT` 段 filesize 未覆盖追加数据，TrollFools 重签按段大小重写，文件尾数据丢失
-- 排查：`__LINKEDIT` filesize + fileoff ≠ 文件末尾
-- 解决方案：追加数据后**必须更新 `__LINKEDIT` filesize**（或换 lld 构建一劳永逸）
-
-**问题 6：constructor 里调用 objc runtime API 崩溃（SIGILL）**
-- 原因：dyld initializer 阶段 runtime 未完全就绪，`class_getClassMethod` 等触发 libobjc assert
-- 排查：崩溃堆栈在 constructor
-- 解决方案：constructor 只做 `dlsym` 解析 + 注册 `UIApplicationDidFinishLaunchingNotification` 观察者，Hook 推迟到启动完成后
-
-**问题 7：弹窗在注入早期崩溃**
-- 原因：UIAlertView 在 App UI 环境未就绪时调用
-- 解决方案：弹窗放在通知回调（启动完成后）；用 NSTimer 2 秒自动 dismiss
-
-**问题 8：注入后启动页卡住**
-- 原因：hook 了启动背景图流程（`setDelayStartBackgroundImageView`）——置空后背景图不移除
-- 排查：二分法——只保留最小 Hook 集，逐批加回
-- 解决方案：不 hook 该流程；确认某 Hook 导致卡住就用最小化二分定位
-
-**问题 9：Frida attach/spawn 秒退（SIGTRAP）**
-- 原因：frida-server 与 iOS 16/RootHide 环境兼容差（gum 注入崩溃），或 App 反调试
-- 排查：崩溃线程模块归属（镜像名 `?` = 注入代码）；对照测试（attach 系统 App 也失败 = 环境问题）
-- 解决方案：放弃 Frida 动态方案，改用**可见标记**（弹窗）做验证
-
-**问题 10：注入后 app 崩（插件加载成功但 hook 执行崩）**
-- 原因：hook 的方法调用方对返回值/行为有强依赖，或 hook 了启动关键路径
-- 排查：崩溃日志定位崩溃线程；最小化二分
-- 解决方案：延迟 hook 时机 + 逐批验证（先最小集，确认稳定再扩展）
+| 禁止行为 | 后果 |
+|---|---|
+| **未分析 IPA 就编写 Hook** | 方法名/类名错误，静默失效，浪费迭代 |
+| **一次加入大量 Hook** | 崩溃/失效时无法定位是哪个 Hook 的问题 |
+| **constructor 阶段执行复杂逻辑**（调 objc API） | SIGILL 崩溃（runtime 未就绪） |
+| **未验证 dylib 加载就判断失败** | weak 加载失败静默无痕，无弹窗验证 = 没验证 |
+| **修改 Mach-O 前不备份** | 修补 rebase/load commands 出错后无法回滚 |
+| **hook 启动流程关键步骤**（如启动背景图） | 启动页卡死 |
+| **依赖沙盒日志文件验证** | iOS 沙盒 Documents 用户无法访问 |
+| **在 RootHide 环境依赖 Frida 动态验证** | gum 注入 SIGTRAP，浪费时间 |
+| **手工修补 zig 产物 rebase** | load commands 损坏（16 字节 DYLD_INFO 陷阱） |
+| **App 升级后不重新逆向** | 方法名变化导致 Hook MISS |
 
 ---
 
 ## 可复用模板
 
-> ⚠️ **重要**：以下模板为**参考框架**。目标 App 的类名、方法名、bundle id、SDK 出口必然不同，**必须基于实际逆向结果调整**，不可直接复制使用。模板中的 `p_xxx` 函数指针需对应实际 dlsym 的符号。
+> ⚠️ 所有模板为**经过验证的可编译参考模板**，需根据目标 App、SDK、架构和环境调整，不可直接复制。
 
-### 项目结构模板
+| 模板 | 文件 | 说明 |
+|---|---|---|
+| Hook 源码 | templates/hook.c | 完整 C 源码（符号解析 + 通知延迟 + 逐点确认 + 弹窗验证） |
+| 构建脚本 | templates/build.sh | clang + ld64.lld 编译 + 结构自检 |
+| 结构验证 | templates/check_macho.py | Mach-O 结构 PASS/FAIL 检查（CHAINED_FIXUPS/__init_offsets/__LINKEDIT） |
+
+---
+
+## Final Report Format
+
+> Agent 完成任务后，必须按以下格式输出报告。
+
 ```
-project/
-├── out.dylib        # 最终产物
-├── src.c            # 源码
-├── README.md        # 文档（含踩坑记录）
-└── LICENSE          # MIT
-```
+1. Target Analysis
+   - App 名称 / 版本 / Bundle ID / 架构 / iOS 环境
 
-### 初始化模板（符号解析 + 通知延迟）
-```c
-// 参考框架：需替换实际类名/符号
-__attribute__((constructor))
-static void init(void) {
-    // 1. dlsym 解析所有 objc/Foundation 符号（全部运行时获取）
-    *(void **)&p_objc_getClass = dlsym(RTLD_DEFAULT, "objc_getClass");
-    *(void **)&p_objc_msgSend = dlsym(RTLD_DEFAULT, "objc_msgSend");
-    // ... 其他符号（sel_registerName / class_getClassMethod / method_setImplementation / NSHomeDirectory 等）
-    // 2. 注册 UIApplicationDidFinishLaunching 观察者（block）
-    // 3. 通知回调里执行全部 Hook
-}
-```
+2. Reverse Engineering Findings
+   - 技术栈（广告 SDK/聚合平台）
+   - 目标功能完整触发链路
+   - 关键证据（唯一出口、总开关、调用者数量）
 
-### Hook 模板
-```c
-// 参考框架：类名/方法名按目标 App 调整；返回类型匹配原方法
-static void stub_void(id self, SEL _cmd, ...) { }
-static BOOL stub_no(id self, SEL _cmd, ...) { return NO; }
+3. Hook Points
+   - 每个 Hook 点：类名 / 方法名 / 层级（总开关/入口/出口）/ IDA 确认证据
 
-static void qs_hook_class(Class cls, const char *selName, IMP newImp) {
-    if (!cls) return;
-    Method m = p_class_getClassMethod(cls, p_sel_registerName(selName));
-    if (m) p_method_setImplementation(m, newImp);
-    // 记录 MISS（方法不存在 = 版本差异，需重新逆向确认）
-}
-```
+4. Implementation
+   - 源码位置 / Hook 时机 / 链接参数 / 工具链版本
 
-### 调试日志模板
-```c
-#define LOG(fmt, ...) fprintf(stderr, "[PluginName] " fmt "\n", ##__VA_ARGS__)
-// 每次 hook 成功/失败都 LOG，方便 stderr 排查
-// 可见验证：UIAlertView + NSTimer 2 秒自动 dismiss（参考实现见下方要点）
+5. Build Result
+   - 构建命令 / 产物结构验证结果（check_macho.py PASS）
+
+6. Test Result
+   - 验证手段（弹窗/标题）/ 实际观察结果 / 是否通过
+
+7. Known Issues
+   - 未解决项 / 环境限制 / 潜在兼容问题
+
+8. Maintenance Notes
+   - 版本差异风险 / 更新注意事项 / 踩坑记录
 ```
 
-### 发布流程模板
-```bash
-git init && git add . && git commit -m "Initial release: v1.0.0"
-gh repo create NAME --public --source . --remote origin --push
-gh release create v1.0.0 out.dylib --title "v1.0.0" --notes "使用说明"
-```
+---
+
+## Maintenance
+
+> Skill 自身版本管理规范。SKILL.md frontmatter 的 `version` 字段。
+
+| 类型 | 适用场景 | 示例 |
+|---|---|---|
+| **patch**（x.y.**z**） | 修复错误内容、补充单条排错记录、修正模板 bug | `2.0.0 → 2.0.1` |
+| **minor**（x.**y**.0） | 新增 references/模板/案例、扩展已有章节 | `2.0.0 → 2.1.0` |
+| **major**（**x**.0.0） | 工作流程或结构变更、决策树调整、章节增删 | `1.0.0 → 2.0.0` |
+
+维护规则：
+- 每次更新同步更新本地源（`~\.config\opencode\skills\trollfools-inject-dev\`）与 GitHub 仓库（`trollfools-inject-dev-skill`），本地为主版本
+- 内容变更必须保留历史经验——只增不删，或迁移时保持知识零丢失
+- 发布到 GitHub 时更新 CHANGELOG 或 Release notes
 
 ---
 
@@ -310,7 +245,7 @@ gh release create v1.0.0 out.dylib --title "v1.0.0" --notes "使用说明"
 2. **每次修改保持可验证**：每个版本必须有用户可见的验证手段（弹窗/标题/行为变化），禁止"试试看"
 3. **保留调试日志**：stderr 日志 + 落盘日志双保险，hook 成功/MISS 都要记录
 4. **遇到未知行为优先逆向确认**：不猜——崩溃用 .ips 分析，失效用最小化二分，加载问题查结构
-5. **不凭猜测修改关键逻辑**：rebase/load commands 等二进制级修改必须逐字节验证（对比 diff、dump 完整性）
+5. **不凭猜测修改关键逻辑**：rebase/load commands 等二进制级修改必须逐字节验证（对比 diff、dump 完整性），修改前必须备份
 6. **弱加载必须建立可见验证**：TrollFools weak 加载失败静默无痕，没有弹窗标记就等于没验证
 7. **编译工具链先验证结构**：本项目验证有效的是 clang + ld64.lld；使用其他工具链时，先验证 `CHAINED_FIXUPS`/`__init_offsets` 存在再继续
 8. **Hook 时机推迟**：constructor 只注册通知，Hook 放启动完成后（避免早期 SIGILL）
