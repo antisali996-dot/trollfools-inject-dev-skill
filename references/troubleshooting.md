@@ -78,6 +78,78 @@ TrollFools 用 `LC_LOAD_WEAK_DYLIB` 弱加载——**加载失败静默跳过**�
 - **排查**：崩溃日志定位崩溃线程；最小化二分
 - **解决**：延迟 hook 时机 + 逐批验证（先最小集，确认稳定再扩展）
 
+## 信号分层排查（四类情况）
+
+> 用三层信号（PLUGIN LOADED / HOOK INSTALLED / HOOK HIT）定位问题，详见 ui-diagnostics.md。**不要看到行为异常就直接判断「Hook 点错了」。**
+
+### 情况 1：没有任何提示（无弹窗、无 HIT、无日志）
+
+按顺序逐层确认，定位断在哪一层：
+
+```text
+PLUGIN LOADED?（constructor 是否执行 → dylib 是否加载）
+↓
+HOOK INSTALLED?（Class/Method 是否找到，IMP 是否替换）
+↓
+HOOK HIT?（目标 selector 是否真正执行）
+```
+
+### 情况 2：PLUGIN LOADED 有，HOOK HIT 没有
+
+可能原因：
+
+```text
+Method 不存在（MISS）
+版本差异（App 升级后方法名变化）
+IMP 被覆盖（其他插件/代码路径重复安装）
+实际路径不同（目标类来自 Framework 而非主程序）
+目标 selector 没执行（展示路径没走到这个点）
+Hook 时机不对（Hook 安装晚于首次调用）
+```
+
+### 情况 3：HOOK HIT 有，但目标行为仍然存在
+
+按以下顺序排查，**不要马上增加第二个 Hook**：
+
+```text
+HOOK HIT（Hook 确实命中了）
+↓
+Hook 后是否继续执行下游（置空/改返回值后，原流程是否仍被继续调用）
+↓
+异步 callback / delegate / notification（结果由另一个线程/对象补上）
+↓
+另一对象（同一个行为由另一个实例完成）
+↓
+另一展示入口（存在第二个展示路径，本 Hook 点只是其一）
+↓
+真实行为路径（重新逆向确认真正的执行路径）
+```
+
+### 情况 4：目标行为偶尔出现、偶尔不出现
+
+> **偶发行为本身不能证明 Hook 成功。**
+
+「有时候有广告、有时候没广告」不能直接归因于 Hook 生效，可能因素包括：
+
+```text
+服务端不下发
+频控
+缓存
+网络
+广告填充失败
+随机策略
+其他执行路径
+Hook 真命中（L3）
+```
+
+必须结合三者判断：
+
+```text
+Hook HIT（L3 证据）
++ 输入数据（服务端下发内容、参数）
++ 真实展示路径（逆向确认的完整链路）
+```
+
 ## Frida 使用注意
 
 Frida + frida-server 在本类环境（iOS 16 + RootHide）**不可靠**——gum 注入 SIGTRAP。动态验证受阻时**改用可见标记方案**（弹窗验证）。若需使用 Frida，先做对照测试判断是环境问题还是 App 反调试。

@@ -1,7 +1,7 @@
 ---
 name: trollfools-inject-dev
 description: iOS App 去广告/功能修改的 TrollFools 注入插件开发全流程。用于分析目标 App 机制、设计注入方案、编写 Hook dylib、交叉编译、注入调试与发布。适用于 TrollStore/TrollFools 环境下的 iOS 插件开发任务。
-version: 2.0.0
+version: 2.1.1
 tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆向, 注入, 去广告]
 ---
 
@@ -86,7 +86,7 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 以下是本 Skill 最重要的经验，Agent 应优先理解：
 
 1. **TrollFools 注入是 weak 加载，失败静默无痕**——`LC_LOAD_WEAK_DYLIB` 加载失败时 dyld 直接跳过，无崩溃无日志。因此**必须建立可见验证**（弹窗/标题），否则"注入成功但没效果"无法区分是"没加载"还是"hook 没生效"。
-2. **iOS dylib 必须用 clang + ld64.lld 构建**——生成 `CHAINED_FIXUPS` + `__init_offsets` 结构。zig 等工具链产物缺此结构，会被 dyld 静默拒绝（本项目最大的坑，浪费了大量迭代）。
+2. **工具链以环境验证为准**——当前 TrollFools/iOS 注入环境已经验证的工具链优先使用 clang + ld64.lld（生成 `CHAINED_FIXUPS` + `__init_offsets` 结构）；**更换工具链时必须先验证目标 Mach-O 的 load commands、fixups、init 信息以及真实设备加载情况**（zig 等工具链产物缺此结构，会被 dyld 静默拒绝——本项目最大的坑）。
 3. **Hook 时机推迟到启动完成后**——constructor（dyld initializer）阶段直接调用 objc runtime API 会 SIGILL（runtime 未初始化）。constructor 只做 dlsym + 注册通知观察者。
 4. **先找"唯一出口"，再找"总开关"，最后兜底"入口层"**——多层级 Hook 设计（如 TopOn 聚合的 `showSplashWithPlacementID:` 是所有渠道开屏的最终出口；`isAdsWithAdCode:` 是服务端控制的总开关）。
 5. **崩溃分析看 .ips 报告**——SIGILL 多为 constructor 指针/rebase 问题；SIGTRAP 多为 Frida 注入被拒；"卡住不崩"多为 hook 破坏了启动流程。
@@ -95,6 +95,8 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 8. **不要 hook 启动流程关键步骤**（如启动背景图流程），置空会导致启动页卡死。
 9. **Frida 在本类环境（iOS 16 + RootHide）不可靠**——gum 注入 SIGTRAP；动态验证受阻时改用可见标记方案。
 10. **交付物必须含踩坑记录**——README 记录失败经验是对后续使用者最大的价值。
+11. **Hook 验证必须分三层信号**——`PLUGIN LOADED`（dylib 加载）→ `HOOK INSTALLED`（方法找到+IMP 替换）→ `HOOK HIT`（目标 selector 真实执行）。**HOOK INSTALLED ≠ HOOK HIT**，HIT 只能来自 Hook 函数本身的执行，禁止在注册代码里打印 HIT。
+12. **偶发行为不证明 Hook 成功**——「有时没广告」可能是服务端不下发/频控/缓存/填充失败/其他展示路径；必须结合 HOOK HIT + 输入数据 + 真实展示路径判断。
 
 ---
 
@@ -143,9 +145,9 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 - **详见**：references/hook-design.md（Hook 时机规则）
 
 ### 6. 调试验证
-- **要点**：建立**可见验证**（弹窗/标题）——weak 加载失败静默无痕，没有弹窗标记就等于没验证
-- **常用工具**：可见标记（`UIAlertView` + 2 秒 NSTimer）、TrollFools 注入日志、.ips 崩溃日志
-- **详见**：references/troubleshooting.md
+- **要点**：建立**可见验证**（弹窗/标题）——weak 加载失败静默无痕，没有弹窗标记就等于没验证；验证按三层信号分层（PLUGIN LOADED → HOOK INSTALLED → HOOK HIT），HIT 必须来自 Hook 函数本身
+- **常用工具**：可见标记（`UIAlertView` + 2 秒 NSTimer）、TrollFools 注入日志、.ips 崩溃日志、HIT 计数（冷/热启动对照）
+- **详见**：references/troubleshooting.md、references/ui-diagnostics.md
 
 ### 7. 修复问题
 - **要点**：按崩溃/失效表现定位修复；**最小化二分**——一次只改一个变量，每个版本给用户可验证预期
@@ -173,6 +175,9 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 | **在 RootHide 环境依赖 Frida 动态验证** | gum 注入 SIGTRAP，浪费时间 |
 | **手工修补 zig 产物 rebase** | load commands 损坏（16 字节 DYLD_INFO 陷阱） |
 | **App 升级后不重新逆向** | 方法名变化导致 Hook MISS |
+| **注册成功即宣称 Hook 成功**（method_setImplementation 成功就打印 HIT/OK） | 混淆 INSTALLED 与 HIT，验证失真；正确语义：安装成功 → `HOOK INSTALLED`，selector 真执行 → `HOOK HIT` |
+| **没有运行时证据就堆 Hook**（A 不明显生效直接加 B 再加 C） | 最后不知道哪个真正有效；正确顺序：确认 HIT → 查下游 → 找真实路径 → 再决定第二个 Hook |
+| **用偶发「没广告」证明去广告 Hook 成功** | 可能是服务端不下发/频控/缓存/填充失败；必须有实际 HOOK HIT 或等价证据 |
 
 ---
 
@@ -212,6 +217,7 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 
 6. Test Result
    - 验证手段（弹窗/标题）/ 实际观察结果 / 是否通过
+   - 证据分级：Static Evidence（L0-L1） / Runtime Evidence（L2-L3：INSTALLED/HIT） / Device Validation（L4）——每个关键结论标注级别
 
 7. Known Issues
    - 未解决项 / 环境限制 / 潜在兼容问题
@@ -251,3 +257,5 @@ tags: [ios, trollstore, trollfools, dylib, hook, objc, reverse-engineering, 逆�
 8. **Hook 时机推迟**：constructor 只注册通知，Hook 放启动完成后（避免早期 SIGILL）
 9. **最小化二分**：批量 Hook 失效/崩溃时，先最小集验证再逐批加回
 10. **交付含失败经验**：README 必须记录踩坑（结构问题/时机问题），这是对使用者最大的价值
+11. **按三层信号验证 Hook**：`PLUGIN LOADED`（dylib 加载）→ `HOOK INSTALLED`（IMP 替换）→ `HOOK HIT`（selector 真执行，必须来自 Hook 函数 body）；HOOK INSTALLED ≠ HOOK HIT
+12. **偶发行为不证明成功**：行为「有时消失」必须结合 HOOK HIT + 输入数据 + 真实展示路径判断，不凭偶发现象下结论

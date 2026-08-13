@@ -84,24 +84,33 @@ Agent 将自动执行：Before Start Checklist → Decision Tree → SOP 8 步 �
 
 ```
 trollfools-inject-dev/
-├── SKILL.md                    # 核心流程 + 决策入口（v2.0.0）
+├── SKILL.md                    # 核心流程 + 决策入口（v2.1.1）
 ├── README.md
 ├── LICENSE                     # MIT
 ├── references/
 │   ├── macho-debug.md          # Mach-O、dyld、rebase、load commands 深度排错
 │   ├── ida-workflow.md         # IDA 分析流程
-│   ├── hook-design.md          # Hook 点设计方法
-│   └── troubleshooting.md      # 崩溃和失败排查（10 个常见问题）
+│   ├── hook-design.md          # Hook 点设计方法（含 Runtime Verification + 证据分级 L0-L4）
+│   ├── troubleshooting.md      # 崩溃和失败排查（10 个常见问题 + 四类信号分层排查）
+│   └── ui-diagnostics.md       # UI/可见诊断：三层信号、UIKit 线程、无日志 fallback
 ├── templates/
-│   ├── hook.c                  # Hook 源码模板
+│   ├── hook.c                  # Hook 源码模板（PLUGIN LOADED / HOOK INSTALLED / HOOK HIT #N）
 │   ├── build.sh                # 构建脚本模板
 │   └── check_macho.py          # Mach-O 结构验证脚本
 └── examples/
-    └── qs-noads-case.md        # 趣智校园真实案例复盘
+    ├── qs-noads-case.md        # 趣智校园真实案例复盘
+    └── 5eplay-splash-case.md   # 5EPlay 案例：三层信号 + 冷/热启动汇合点 + 偶发行为判断
 ```
 
 ## 更新记录
 
+- **v2.1.1**（最小 patch）：
+  - Fixed: Clarified that L4 device validation is specific to the tested App version, device, OS environment and test scenario; validation cannot be automatically inherited across versions/devices/apps.
+  - Fixed: Softened the clang + ld64.lld toolchain wording to reflect environment-validated guidance rather than an unconditional requirement.
+- **v2.1.0**（知识增量 + 模板语义修正）：
+  - Added: Runtime Hook verification hierarchy（PLUGIN LOADED / HOOK INSTALLED / HOOK HIT）；HOOK HIT counter；Evidence Level L0-L4；TrollFools UI diagnostics（references/ui-diagnostics.md）；UIKit callback/thread troubleshooting；No-log fallback strategy；5EPlay splash-ad reverse-engineering case（examples/5eplay-splash-case.md）
+  - Improved: Hook validation semantics（hook.c 的 `hook OK` 修正为 `HOOK INSTALLED`，新增 `HOOK HIT #N`）；Troubleshooting flow（四类信号分层排查）；Anti-patterns for blindly stacking Hooks；Intermittent-behavior diagnosis（偶发行为不证明 Hook 成功）
+  - Preserved: v2.0.0 全部经验（SOP/Checklist/Decision Tree/Anti Patterns/Final Report/Maintenance 无删除）
 - **v2.0.0**（结构重构）：SKILL.md 增加 Before Start Checklist / Decision Tree / Anti Patterns / Final Report Format / Maintenance；拆分 references/templates/examples 目录；全部经验零丢失迁移
 - **v1.0.0**：初始版本，单文件 SKILL.md
 
